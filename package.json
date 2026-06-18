@@ -1,0 +1,16 @@
+{
+  "name": "git-commit-api",
+  "version": "1.0.0",
+  "description": "Node.js API for reading local Git repository commit records",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": ["git", "api", "express", "commits"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "express": "^4.19.2"
+  }
+}
