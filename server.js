@@ -4,6 +4,7 @@ const {
   getCommitsStream,
   getCommitsWithPagination,
   getTotalCommits,
+  getAuthors,
   clearCache
 } = require('./gitUtils');
 
@@ -25,13 +26,14 @@ app.use((req, res, next) => {
 app.get('/', (req, res) => {
   res.json({
     name: 'Git Commit API',
-    version: '2.0.0',
-    description: '优化版本：支持分页、流式输出、缓存和超时控制',
+    version: '2.1.0',
+    description: '支持作者筛选、分页、流式输出、缓存和超时控制',
     endpoints: {
-      'GET /api/commits': '获取提交记录（支持 limit, skip, path 参数）',
-      'GET /api/commits/page': '分页获取提交记录（支持 page, pageSize, path 参数）',
-      'GET /api/commits/stream': 'SSE 流式获取提交记录（支持 limit, skip, path 参数）',
-      'GET /api/commits/total': '获取仓库总提交数',
+      'GET /api/commits': '获取提交记录（支持 limit, skip, path, author 参数）',
+      'GET /api/commits/page': '分页获取提交记录（支持 page, pageSize, path, author 参数）',
+      'GET /api/commits/stream': 'SSE 流式获取提交记录（支持 limit, skip, path, author 参数）',
+      'GET /api/commits/total': '获取仓库总提交数（支持 path, author 参数）',
+      'GET /api/authors': '获取所有作者列表及提交数统计',
       'POST /api/cache/clear': '清除缓存'
     }
   });
@@ -39,7 +41,7 @@ app.get('/', (req, res) => {
 
 app.get('/api/commits', async (req, res) => {
   try {
-    const { path, limit, skip } = req.query;
+    const { path, limit, skip, author } = req.query;
     const parsedLimit = limit ? parseInt(limit, 10) : 10;
     const parsedSkip = skip ? parseInt(skip, 10) : 0;
 
@@ -57,7 +59,7 @@ app.get('/api/commits', async (req, res) => {
       });
     }
 
-    const result = await getRecentCommits(path, parsedLimit, parsedSkip);
+    const result = await getRecentCommits(path, parsedLimit, parsedSkip, { author });
 
     res.json({
       success: true,
@@ -73,7 +75,7 @@ app.get('/api/commits', async (req, res) => {
 
 app.get('/api/commits/page', async (req, res) => {
   try {
-    const { path, page, pageSize } = req.query;
+    const { path, page, pageSize, author } = req.query;
     const parsedPage = page ? parseInt(page, 10) : 1;
     const parsedPageSize = pageSize ? parseInt(pageSize, 10) : 10;
 
@@ -91,7 +93,7 @@ app.get('/api/commits/page', async (req, res) => {
       });
     }
 
-    const result = await getCommitsWithPagination(path, parsedPage, parsedPageSize);
+    const result = await getCommitsWithPagination(path, parsedPage, parsedPageSize, { author });
 
     res.json({
       success: true,
@@ -107,7 +109,7 @@ app.get('/api/commits/page', async (req, res) => {
 
 app.get('/api/commits/stream', (req, res) => {
   try {
-    const { path, limit, skip } = req.query;
+    const { path, limit, skip, author } = req.query;
     const parsedLimit = limit ? parseInt(limit, 10) : 50;
     const parsedSkip = skip ? parseInt(skip, 10) : 0;
 
@@ -136,6 +138,7 @@ app.get('/api/commits/stream', (req, res) => {
       status: 'start',
       limit: parsedLimit,
       skip: parsedSkip,
+      author: author || null,
       timestamp: Date.now()
     })}\n\n`);
 
@@ -144,6 +147,7 @@ app.get('/api/commits/stream', (req, res) => {
     const child = getCommitsStream(path, {
       limit: parsedLimit,
       skip: parsedSkip,
+      author,
       timeout: 120000,
       onData: (commit, index) => {
         commitCount++;
@@ -154,6 +158,7 @@ app.get('/api/commits/stream', (req, res) => {
           status: 'complete',
           total,
           repoPath,
+          authorFilter: author || null,
           commitCount
         })}\n\n`);
         res.end();
@@ -186,15 +191,33 @@ app.get('/api/commits/stream', (req, res) => {
 
 app.get('/api/commits/total', async (req, res) => {
   try {
-    const { path } = req.query;
-    const total = await getTotalCommits(path);
+    const { path, author } = req.query;
+    const total = await getTotalCommits(path, { author });
 
     res.json({
       success: true,
       data: {
         repoPath: path || process.cwd(),
+        authorFilter: author || null,
         totalCommits: total
       }
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+app.get('/api/authors', async (req, res) => {
+  try {
+    const { path } = req.query;
+    const result = await getAuthors(path);
+
+    res.json({
+      success: true,
+      data: result
     });
   } catch (error) {
     res.status(500).json({
@@ -221,7 +244,7 @@ app.post('/api/cache/clear', (req, res) => {
 
 app.listen(PORT, () => {
   console.log('========================================');
-  console.log('  Git Commit API v2.0.0');
+  console.log('  Git Commit API v2.1.0');
   console.log('========================================');
   console.log(`服务已启动: http://localhost:${PORT}`);
   console.log('');
@@ -230,6 +253,9 @@ app.listen(PORT, () => {
   console.log('  GET  /api/commits/page      - 分页获取');
   console.log('  GET  /api/commits/stream    - SSE 流式输出');
   console.log('  GET  /api/commits/total     - 获取总提交数');
+  console.log('  GET  /api/authors           - 作者列表');
   console.log('  POST /api/cache/clear       - 清除缓存');
+  console.log('');
+  console.log('  所有接口均支持 author 参数筛选作者');
   console.log('========================================');
 });

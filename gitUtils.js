@@ -14,9 +14,9 @@ function expandHomeDir(dirPath) {
   return dirPath;
 }
 
-function getCacheKey(repoPath, limit, skip) {
+function getCacheKey(repoPath, limit, skip, author) {
   const hash = crypto.createHash('md5');
-  hash.update(`${repoPath}|${limit}|${skip}`);
+  hash.update(`${repoPath}|${limit}|${skip}|${author || ''}`);
   return hash.digest('hex');
 }
 
@@ -36,29 +36,51 @@ function setCache(key, data) {
   });
 }
 
-function getTotalCommits(repoPath, timeout = DEFAULT_TIMEOUT) {
+function getTotalCommits(repoPath, options = {}) {
   return new Promise((resolve, reject) => {
+    const { author, timeout = DEFAULT_TIMEOUT } = options;
     const resolvedPath = path.resolve(expandHomeDir(repoPath || process.cwd()));
-    const cacheKey = `total_${resolvedPath}`;
+    const cacheKey = `total_${resolvedPath}_${author || ''}`;
 
     const cached = getCache(cacheKey);
     if (cached !== null) {
       return resolve(cached);
     }
 
-    const command = 'git rev-list --count HEAD';
+    const args = ['rev-list', '--count', 'HEAD'];
+    if (author) {
+      args.push('--author', author);
+    }
+
     let timer = null;
 
-    const child = exec(command, { cwd: resolvedPath, timeout }, (error, stdout, stderr) => {
+    const child = spawn('git', args, { cwd: resolvedPath });
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString('utf8');
+    });
+
+    child.stderr.on('data', (data) => {
+      stderr += data.toString('utf8');
+    });
+
+    child.on('close', (code) => {
       clearTimeout(timer);
-      if (error) {
-        const errorMsg = stderr && stderr.trim() ? stderr.trim() : error.message;
+      if (code === 0) {
+        const total = parseInt(stdout.trim(), 10) || 0;
+        setCache(cacheKey, total);
+        resolve(total);
+      } else {
+        const errorMsg = stderr.trim() || `Git 进程退出代码: ${code}`;
         reject(new Error(`Git 命令执行失败: ${errorMsg}`));
-        return;
       }
-      const total = parseInt(stdout.trim(), 10) || 0;
-      setCache(cacheKey, total);
-      resolve(total);
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
     });
 
     timer = setTimeout(() => {
@@ -85,6 +107,7 @@ function getCommitsStream(repoPath, options = {}) {
     limit = 10,
     skip = 0,
     timeout = DEFAULT_TIMEOUT,
+    author = null,
     onData,
     onEnd,
     onError
@@ -94,6 +117,9 @@ function getCommitsStream(repoPath, options = {}) {
   const format = '%H|%h|%an|%ae|%ai|%s';
   const args = ['log', '--pretty=format:' + format];
 
+  if (author) {
+    args.push('--author', author);
+  }
   if (skip > 0) {
     args.push('--skip', String(skip));
   }
@@ -105,13 +131,16 @@ function getCommitsStream(repoPath, options = {}) {
   let buffer = '';
   let count = 0;
   let timer = null;
+  let errorOccurred = false;
 
   timer = setTimeout(() => {
     child.kill('SIGTERM');
+    errorOccurred = true;
     if (onError) onError(new Error('Git 命令执行超时'));
   }, timeout);
 
   child.stdout.on('data', (data) => {
+    if (errorOccurred) return;
     buffer += data.toString('utf8');
     const lines = buffer.split('\n');
     buffer = lines.pop() || '';
@@ -126,16 +155,19 @@ function getCommitsStream(repoPath, options = {}) {
   });
 
   child.stderr.on('data', (data) => {
+    if (errorOccurred) return;
     const errorMsg = data.toString('utf8').trim();
-    if (errorMsg && onError) {
+    if (errorMsg) {
+      errorOccurred = true;
       clearTimeout(timer);
-      onError(new Error(`Git 命令执行失败: ${errorMsg}`));
+      if (onError) onError(new Error(`Git 命令执行失败: ${errorMsg}`));
       child.kill();
     }
   });
 
   child.on('close', (code) => {
     clearTimeout(timer);
+    if (errorOccurred) return;
     if (code === 0) {
       if (buffer.trim()) {
         const commit = parseCommitLine(buffer.trim());
@@ -149,6 +181,8 @@ function getCommitsStream(repoPath, options = {}) {
   });
 
   child.on('error', (err) => {
+    if (errorOccurred) return;
+    errorOccurred = true;
     clearTimeout(timer);
     if (onError) onError(err);
   });
@@ -156,10 +190,11 @@ function getCommitsStream(repoPath, options = {}) {
   return child;
 }
 
-function getRecentCommits(repoPath, limit = 10, skip = 0, timeout = DEFAULT_TIMEOUT) {
+function getRecentCommits(repoPath, limit = 10, skip = 0, options = {}) {
   return new Promise((resolve, reject) => {
+    const { author, timeout = DEFAULT_TIMEOUT } = options;
     const resolvedPath = path.resolve(expandHomeDir(repoPath || process.cwd()));
-    const cacheKey = getCacheKey(resolvedPath, limit, skip);
+    const cacheKey = getCacheKey(resolvedPath, limit, skip, author);
 
     const cached = getCache(cacheKey);
     if (cached !== null) {
@@ -171,6 +206,7 @@ function getRecentCommits(repoPath, limit = 10, skip = 0, timeout = DEFAULT_TIME
     getCommitsStream(repoPath, {
       limit,
       skip,
+      author,
       timeout,
       onData: (commit) => {
         commits.push(commit);
@@ -178,6 +214,7 @@ function getRecentCommits(repoPath, limit = 10, skip = 0, timeout = DEFAULT_TIME
       onEnd: (total, path) => {
         const result = {
           repoPath: path,
+          authorFilter: author || null,
           total,
           commits
         };
@@ -191,11 +228,12 @@ function getRecentCommits(repoPath, limit = 10, skip = 0, timeout = DEFAULT_TIME
   });
 }
 
-function getCommitsWithPagination(repoPath, page = 1, pageSize = 10) {
+function getCommitsWithPagination(repoPath, page = 1, pageSize = 10, options = {}) {
   const skip = (page - 1) * pageSize;
+  const { author } = options;
   return Promise.all([
-    getTotalCommits(repoPath),
-    getRecentCommits(repoPath, pageSize, skip)
+    getTotalCommits(repoPath, { author }),
+    getRecentCommits(repoPath, pageSize, skip, { author })
   ]).then(([totalCount, result]) => ({
     ...result,
     totalCount,
@@ -203,6 +241,80 @@ function getCommitsWithPagination(repoPath, page = 1, pageSize = 10) {
     pageSize,
     totalPages: Math.ceil(totalCount / pageSize) || 0
   }));
+}
+
+function getAuthors(repoPath, timeout = DEFAULT_TIMEOUT) {
+  return new Promise((resolve, reject) => {
+    const resolvedPath = path.resolve(expandHomeDir(repoPath || process.cwd()));
+    const cacheKey = `authors_${resolvedPath}`;
+
+    const cached = getCache(cacheKey);
+    if (cached !== null) {
+      return resolve(cached);
+    }
+
+    const args = ['log', '--pretty=format:%an|%ae'];
+    const child = spawn('git', args, { cwd: resolvedPath });
+
+    let stdout = '';
+    let stderr = '';
+    let timer = null;
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString('utf8');
+    });
+
+    child.stderr.on('data', (data) => {
+      stderr += data.toString('utf8');
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        const authorMap = new Map();
+        const lines = stdout.trim().split('\n').filter(line => line.trim());
+
+        for (const line of lines) {
+          const [name, email] = line.split('|');
+          if (!authorMap.has(name)) {
+            authorMap.set(name, {
+              name: name || '',
+              email: email || '',
+              commits: 0
+            });
+          }
+          authorMap.get(name).commits++;
+        }
+
+        const authors = Array.from(authorMap.values()).sort((a, b) => b.commits - a.commits);
+
+        setCache(cacheKey, {
+          repoPath: resolvedPath,
+          total: authors.length,
+          authors
+        });
+
+        resolve({
+          repoPath: resolvedPath,
+          total: authors.length,
+          authors
+        });
+      } else {
+        const errorMsg = stderr.trim() || `Git 进程退出代码: ${code}`;
+        reject(new Error(`Git 命令执行失败: ${errorMsg}`));
+      }
+    });
+
+    child.on('error', (err) => {
+      clearTimeout(timer);
+      reject(err);
+    });
+
+    timer = setTimeout(() => {
+      child.kill('SIGTERM');
+      reject(new Error('Git 命令执行超时'));
+    }, timeout);
+  });
 }
 
 function clearCache() {
@@ -214,5 +326,6 @@ module.exports = {
   getCommitsStream,
   getCommitsWithPagination,
   getTotalCommits,
+  getAuthors,
   clearCache
 };
